@@ -145,10 +145,22 @@ def uf2_path(app, override=None):
     where the file came from.
 
     The CPU is still inferred from `app`, so a consumer passing --uf2 must
-    still name its app with the _display/_main suffix -- see app_cpu()."""
+    still name its app with the _display/_main suffix -- see app_cpu().
+
+    The build tree mirrors apps/, and apps/ is one folder per app PAIR with
+    the _display/_main suffix dropped (AGENTS.md: "the folder drops the
+    suffix; the target keeps it") -- e.g. apps/bench holds both bench_display
+    and bench_main. So the .uf2 for `app` lands in build/apps/<folder>/, not
+    build/apps/<app>/, and folder must be recovered by stripping the suffix
+    app_cpu() just used to identify the CPU."""
     if override is not None:
         return pathlib.Path(override)
-    return REPO_ROOT / "build" / "apps" / app / f"{app}.uf2"
+    folder = app
+    for suffix in ("_display", "_main"):
+        if app.endswith(suffix):
+            folder = app[:-len(suffix)]
+            break
+    return REPO_ROOT / "build" / "apps" / folder / f"{app}.uf2"
 
 
 def app_cpu(app):

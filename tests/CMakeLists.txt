@@ -44,6 +44,17 @@ fwog_add_test(test_io_proto ${BSP}/common/io_cfg.c ${BSP}/common/link/io_proto.c
 fwog_add_test(test_io_seq ${BSP}/common/io_cfg.c ${BSP}/common/io_seq.c)
 fwog_add_test(test_io_pins ${BSP}/common/io_cfg.c ${BSP}/common/io_pins.c)
 
+# The one place this file reaches into apps/ rather than bsp/: iotest_seq.c
+# is pure decision logic (no SDK) with the same value as io_pins.c's own
+# host test above -- catching a pin/header-number transcription slip before
+# it reaches hardware -- so it earns the same treatment despite living
+# outside bsp/. See apps/iotest/main/iotest_seq.h's header comment.
+fwog_add_test(test_iotest_seq
+    ${BSP}/common/io_cfg.c ${BSP}/common/io_pins.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../apps/iotest/main/iotest_seq.c)
+target_include_directories(test_iotest_seq PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../apps/iotest/main)
+
 # Same as fwog_add_test, but also puts one CPU's directory on the include
 # path so "platform/board.h" and "watchdog/watchdog.h" resolve. Exactly one
 # CPU per binary: the two board.h files share short macro names by design and

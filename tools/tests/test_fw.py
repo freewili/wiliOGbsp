@@ -21,9 +21,16 @@ class TestFwCommands(unittest.TestCase):
         )
 
     def test_uf2_path(self):
+        """apps/ is one folder per _display/_main PAIR with the suffix
+        dropped (AGENTS.md), and the build tree mirrors apps/ -- so the
+        folder is "hello", not "hello_main"."""
         self.assertEqual(
             fw.uf2_path("hello_main"),
-            fw.REPO_ROOT / "build" / "apps" / "hello_main" / "hello_main.uf2",
+            fw.REPO_ROOT / "build" / "apps" / "hello" / "hello_main.uf2",
+        )
+        self.assertEqual(
+            fw.uf2_path("hello_display"),
+            fw.REPO_ROOT / "build" / "apps" / "hello" / "hello_display.uf2",
         )
 
     def test_uf2_path_override_wins_and_ignores_repo_root(self):

@@ -46,7 +46,7 @@ def find_cpu_port(cpu="display"):
     except KeyError:
         raise SystemExit("unknown --cpu %r (want display or main)" % cpu)
     for p in fw._cpu_ports():
-        if p.vid == fw.RPI_USB_VID and (p.product or "").startswith(prefix):
+        if p.vid in fw.FWOG_USB_VIDS and (p.product or "").startswith(prefix):
             return p.device
     raise SystemExit("no running %s CPU found (is it enumerated?)" % cpu)
 

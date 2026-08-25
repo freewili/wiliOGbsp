@@ -126,6 +126,8 @@ add_subdirectory(apps/bench)
 add_subdirectory(apps/ogvegas)
 # Declares nothing unless LVGL is available -- see apps/lvgl/CMakeLists.txt.
 add_subdirectory(apps/lvgl)
+# Same LVGL guard as apps/lvgl -- see apps/iotest/CMakeLists.txt.
+add_subdirectory(apps/iotest)
 
 # Neither a display app nor a main app: it runs on a CPU nobody has identified
 # yet, links fwog_common only, and embeds nothing. Its position in this list is

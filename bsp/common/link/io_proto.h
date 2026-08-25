@@ -51,6 +51,10 @@
 #define FWOG_IO_MSG_CONFIG_ENABLE 0x20u   /* main -> display */
 #define FWOG_IO_MSG_SET_DIRS      0x21u   /* main -> display */
 #define FWOG_IO_MSG_ACK           0x22u   /* display -> main */
+/* 0x40-0x47 reserved for apps/iotest/proto/iotest_proto.h's own MAIN<->
+   DISPLAY messages (free-form UI content, not direction state -- out of
+   scope for this file). Do not reuse that range; pick above 0x47 if this
+   file ever grows past 0x22. */
 
 typedef struct __attribute__((packed)) {
     uint8_t type;      /* FWOG_IO_MSG_CONFIG_ENABLE */
