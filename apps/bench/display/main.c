@@ -576,7 +576,7 @@ static void cmd_btn(void) {
  *
  * So `bootoe 1` plus a red press plus a main reset is expected to put main in
  * BOOTSEL. That is the point of the command, not a side effect. Recovery is
- * `fw flash bench_main`.
+ * `fw flash bench`.
  *
  * Do NOT leave it at 1. Nothing here auto-reverts, deliberately: the test
  * needs the state held across main's reset, and a timeout that fired mid-test

@@ -6,13 +6,12 @@
  * the power-off hold all at once, which is what makes it a useful "is this
  * board actually working" check.
  *
- * BUILD. It is a display app, so it reaches the board embedded in a main app
- * (see the AGENTS.md warning about UF2-flashing a display application):
+ * BUILD. It is a display app, so it reaches the board embedded in its main
+ * companion (see the AGENTS.md warning about UF2-flashing a display
+ * application):
  *
- *     cmake --preset target -DFWOG_DISPLAY_FIRMWARE=ogvegas_display
- *     cmake --build build --target ogvegas_display
- *     cmake --build build --target ogvegas_main
- *     python tools/fw.py flash ogvegas_main
+ *     python tools/fw.py build ogvegas
+ *     python tools/fw.py flash ogvegas
  *
  * ASSETS. assets/ holds the sources; ogvegas_assets.c is generated from them
  * and checked in, so a normal build needs no image tooling. Regenerating does

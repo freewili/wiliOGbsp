@@ -118,15 +118,78 @@ class TestFwCommands(unittest.TestCase):
         self.assertEqual(fw.uf2_path("hello_main", None),
                          fw.uf2_path("hello_main"))
 
-    def test_app_cpu_from_suffix(self):
-        self.assertEqual(fw.app_cpu("template_display"), "display")
-        self.assertEqual(fw.app_cpu("hello_display"), "display")
-        self.assertEqual(fw.app_cpu("template_main"), "main")
-        self.assertEqual(fw.app_cpu("hello_main"), "main")
+    @staticmethod
+    def _fake_apps(root):
+        """One of each kind of apps/ folder: a pair, a display-only app, the
+        bootloader, and one that targets neither CPU."""
+        for d in ("ogvegas/display", "ogvegas/main", "lcd/display",
+                  "bl/display", "cpuprobe"):
+            (root / "apps" / d).mkdir(parents=True)
+        return root
 
-    def test_app_cpu_unknown_raises(self):
-        with self.assertRaises(ValueError):
-            fw.app_cpu("mystery_app")
+    def test_resolve_app_takes_the_bare_folder_name_silently(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(fw.resolve_app("build", "ogvegas"), "ogvegas")
+        self.assertEqual(err.getvalue(), "")
+
+    def test_resolve_app_strips_a_deprecated_suffix_and_says_so(self):
+        for old in ("ogvegas_main", "ogvegas_display"):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(fw.resolve_app("flash", old), "ogvegas")
+            self.assertIn("deprecated", err.getvalue())
+            self.assertIn("`fw flash ogvegas`", err.getvalue())
+
+    def test_build_target_per_kind_of_folder(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._fake_apps(pathlib.Path(tmp))
+            # A pair builds main, which depends on the display it embeds.
+            self.assertEqual(fw.build_target("ogvegas", root), "ogvegas_main")
+            self.assertEqual(fw.build_target("lcd", root), "lcd_display")
+            self.assertEqual(fw.build_target("cpuprobe", root), "cpuprobe")
+            self.assertEqual(fw.build_target("elsewhere", root), "elsewhere")
+
+    def test_main_target_is_always_main(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._fake_apps(pathlib.Path(tmp))
+            self.assertEqual(fw.main_target("ogvegas", root), "ogvegas_main")
+
+    def test_main_target_refuses_everything_without_a_main_half(self):
+        # A UF2 copy of a display application never boots and takes the
+        # display CPU off USB, so there is no name that flashes one.
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._fake_apps(pathlib.Path(tmp))
+            with self.assertRaisesRegex(ValueError, "FWOG_DISPLAY_FIRMWARE=lcd_display"):
+                fw.main_target("lcd", root)
+            with self.assertRaisesRegex(ValueError, "fw bootloader"):
+                fw.main_target("bl", root)
+            with self.assertRaisesRegex(ValueError, "by hand"):
+                fw.main_target("cpuprobe", root)
+            with self.assertRaisesRegex(ValueError, "no app named"):
+                fw.main_target("nope", root)
+
+    def test_cli_build_takes_the_folder_name(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(fw.main(["build", "template", "--print"]), 0)
+        self.assertIn("--target template_main", out.getvalue())
+
+    def test_cli_build_defaults_to_the_template_pair(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(fw.main(["build", "--print"]), 0)
+        self.assertIn("--target template_main", out.getvalue())
+
+    def test_cli_build_still_accepts_the_old_suffix(self):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            self.assertEqual(fw.main(["build", "template_main", "--print"]), 0)
+        self.assertIn("--target template_main", out.getvalue())
+        self.assertIn("deprecated", err.getvalue())
 
     def test_test_command_is_four_phases(self):
         # CTest (configure+build+run) plus a fourth phase running the
@@ -140,20 +203,6 @@ class TestFwCommands(unittest.TestCase):
         self.assertEqual(cmds[3][0], sys.executable)
         self.assertIn("unittest", cmds[3])
         self.assertIn("discover", cmds[3])
-
-    def test_new_app_rejects_bad_cpu(self):
-        with self.assertRaises(ValueError):
-            fw.new_app("whatever", "coprocessor")
-
-    def test_new_app_rejects_name_cpu_mismatch(self):
-        # `fw flash` decides which processor to tell you to put into BOOTSEL
-        # purely from the app-name suffix. An app named _main but built from
-        # the display template would send you to reflash the wrong half of
-        # the board, so the mismatch is refused at creation time.
-        with self.assertRaises(ValueError):
-            fw.new_app("foo_main", "display")
-        with self.assertRaises(ValueError):
-            fw.new_app("foo_display", "main")
 
     @staticmethod
     def _fake_template(root):
@@ -174,46 +223,9 @@ class TestFwCommands(unittest.TestCase):
         (tpl / "main" / "main.c").write_text("int main(void){return 0;}\n")
         return tpl
 
-    def test_new_app_scaffolds_the_display_half_only(self):
-        import tempfile
-        with tempfile.TemporaryDirectory() as tmp:
-            root = pathlib.Path(tmp)
-            self._fake_template(root)
-
-            dest = fw.new_app("blinky_display", "display", repo_root=root)
-
-            # The FOLDER drops the suffix; the TARGET keeps it.
-            self.assertEqual(dest.name, "blinky")
-            self.assertTrue((dest / "display" / "main.c").exists())
-            self.assertFalse((dest / "main").exists())
-            text = (dest / "CMakeLists.txt").read_text()
-            self.assertIn("blinky_display", text)
-            self.assertNotIn("template", text)
-            self.assertNotIn("add_executable(blinky_main", text)
-
-    def test_new_app_main_half_does_not_embed_a_missing_display(self):
-        """A main-only app has no <folder>_display for the default pair
-        lookup, so an active fwog_embed_display_image() call would fail at
-        configure time. It must be left commented, with instructions."""
-        import tempfile
-        with tempfile.TemporaryDirectory() as tmp:
-            root = pathlib.Path(tmp)
-            self._fake_template(root)
-
-            dest = fw.new_app("blinky_main", "main", repo_root=root)
-
-            self.assertTrue((dest / "main" / "main.c").exists())
-            self.assertFalse((dest / "display").exists())
-            text = (dest / "CMakeLists.txt").read_text()
-            self.assertIn("add_executable(blinky_main", text)
-            self.assertNotIn("add_executable(blinky_display", text)
-            for line in text.splitlines():
-                if "fwog_embed_display_image(blinky_main)" in line:
-                    self.assertTrue(line.lstrip().startswith("#"), line)
-
     def test_new_app_pair_copies_both_halves(self):
-        """No --cpu: the whole template, renamed, so the main half carries
-        the display half and the pair can be flashed with <name>_main."""
+        """The whole template, renamed, so the main half carries the display
+        half and the pair can be flashed with `fw flash <name>`."""
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
@@ -233,8 +245,9 @@ class TestFwCommands(unittest.TestCase):
             self.assertIn("[button_lights_display]", (dest / "display" / "main.c").read_text())
             # The template itself is untouched.
             self.assertIn("template_main", (tpl / "CMakeLists.txt").read_text())
-            # And `fw flash button_lights_main` looks exactly where it builds.
-            self.assertEqual(fw.app_folder("button_lights_main"), dest.name)
+            # And `fw flash button_lights` copies exactly what it builds.
+            self.assertEqual(fw.main_target("button_lights", root),
+                             "button_lights_main")
 
     def test_new_app_pair_rejects_bad_names(self):
         import tempfile
@@ -302,8 +315,8 @@ class TestFwCommands(unittest.TestCase):
             self.assertIn("add_subdirectory(apps/button_lights)", top.read_text())
             text = out.getvalue()
             self.assertIn("added to CMakeLists.txt", text)
-            self.assertIn("python tools/fw.py build button_lights_main", text)
-            self.assertIn("python tools/fw.py flash button_lights_main", text)
+            self.assertIn("python tools/fw.py build button_lights\n", text)
+            self.assertIn("python tools/fw.py flash button_lights\n", text)
 
     def test_cli_new_app_pair_with_line_already_present(self):
         # e.g. someone added the line by hand before running new-app.
@@ -321,19 +334,17 @@ class TestFwCommands(unittest.TestCase):
             self.assertEqual(top.read_text(), before)
             self.assertIn("already in CMakeLists.txt", out.getvalue())
 
-    def test_cli_new_app_half_does_not_touch_cmakelists(self):
+    def test_cli_new_app_has_no_cpu_option(self):
+        # Every app is a pair; scaffolding one half is no longer offered.
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
             self._fake_template(root)
-            top = self._fake_top_cmakelists(root)
-            before = top.read_text()
-            out = io.StringIO()
             with unittest.mock.patch.object(fw, "REPO_ROOT", root), \
-                    contextlib.redirect_stdout(out):
-                self.assertEqual(fw.main(["new-app", "lcd2_display", "--cpu", "display"]), 0)
-            self.assertEqual(top.read_text(), before)
-            self.assertIn("Add `add_subdirectory(apps/lcd2)`", out.getvalue())
+                    contextlib.redirect_stderr(io.StringIO()), \
+                    self.assertRaises(SystemExit):
+                fw.main(["new-app", "lcd2", "--cpu", "display"])
+            self.assertFalse((root / "apps" / "lcd2").exists())
 
     def test_cli_new_app_bad_name_is_one_line_not_a_traceback(self):
         import tempfile
@@ -382,19 +393,6 @@ class TestFwCommands(unittest.TestCase):
             with self.assertRaises(fw.MultipleRp2VolumesError):
                 fw._scan_rpi_rp2([vol1, vol2])
 
-    def test_new_app_refuses_to_overwrite(self):
-        import tempfile
-        with tempfile.TemporaryDirectory() as tmp:
-            root = pathlib.Path(tmp)
-            tpl = root / "apps" / "template"
-            (tpl / "main").mkdir(parents=True)
-            (tpl / "CMakeLists.txt").write_text("x")
-            # The folder is the target name WITHOUT its suffix, so this is
-            # what a clash looks like now.
-            (root / "apps" / "taken").mkdir(parents=True)
-            with self.assertRaises(FileExistsError):
-                fw.new_app("taken_main", "main", repo_root=root)
-
 
 import collections
 
@@ -430,11 +428,14 @@ class TestBootloaderAndConsole(unittest.TestCase):
             [fw.cmake_tool(), "--preset", fw.preset_name(), "-DFWOG_LINK_BAUD=8333333"],
         )
 
-    def test_bootloader_app_targets_the_display_cpu(self):
-        # `fw flash` derives the CPU from the name suffix alone, so the
-        # bootloader app must be named honestly or it would send the
-        # operator to BOOTSEL the wrong processor.
-        self.assertEqual(fw.app_cpu(fw.BOOTLOADER_APP), "display")
+    def test_bootloader_is_flashed_to_the_display_cpu(self):
+        # The one sanctioned UF2 copy to the display CPU. It must say so,
+        # because `fw flash` itself only ever targets main.
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(fw.do_bootloader(True), 0)
+        self.assertIn("<display CPU>", out.getvalue())
+        self.assertIn(fw.BOOTLOADER_APP, out.getvalue())
 
     def _ports(self):
         return [
@@ -938,9 +939,7 @@ def _volume_after(n, vol):
 
 
 class TestFlashTouches(unittest.TestCase):
-    """fw flash identifies the CPU from the app-name suffix -- which it has
-    always trusted, and which new_app refuses to let contradict the template --
-    then touches only that CPU. Every uncertain path degrades to the prompt
+    """fw flash always targets the main CPU and touches only it. Every uncertain path degrades to the prompt
     that is already proven on hardware."""
 
     def setUp(self):
@@ -980,7 +979,7 @@ class TestFlashTouches(unittest.TestCase):
 
     def test_touches_the_apps_own_cpu_then_copies(self):
         touched = []
-        rc = fw.do_flash("template_main", False, ports=self._ports(),
+        rc = fw.do_flash("template", False, ports=self._ports(),
                          touch=touched.append,
                          find_volume=_volume_after(1, self.vol))
         self.assertEqual(rc, 0)
@@ -992,7 +991,7 @@ class TestFlashTouches(unittest.TestCase):
         # already in BOOTSEL. Today's exact behaviour; must not regress.
         touched = []
         paused = []
-        rc = fw.do_flash("template_main", False, ports=self._ports(),
+        rc = fw.do_flash("template", False, ports=self._ports(),
                          touch=touched.append,
                          find_volume=lambda: self.vol,
                          pause=lambda: paused.append(True))
@@ -1015,7 +1014,7 @@ class TestFlashTouches(unittest.TestCase):
         # it would keep this test green.
         touched = []
         ports = [fw.CpuPort("COM65", fw.RPI_USB_VID, "S1", "Pico")]
-        rc = fw.do_flash("template_main", False, ports=ports,
+        rc = fw.do_flash("template", False, ports=ports,
                          touch=touched.append,
                          find_volume=_volume_after(1, self.vol))
         self.assertEqual(rc, 0)
@@ -1031,7 +1030,7 @@ class TestFlashTouches(unittest.TestCase):
         def boom():
             raise fw.MultipleRp2VolumesError("two volumes")
         touched = []
-        rc = fw.do_flash("template_main", False, ports=self._ports(),
+        rc = fw.do_flash("template", False, ports=self._ports(),
                          touch=touched.append, find_volume=boom)
         self.assertEqual(rc, 1)
         self.assertEqual(touched, [])
@@ -1042,7 +1041,7 @@ class TestFlashTouches(unittest.TestCase):
         # touched, but no volume ever showed up. timeout_s=0 makes
         # _wait_for_volume perform exactly one check, so this stays fast.
         touched = []
-        rc = fw.do_flash("template_main", False, ports=self._ports(),
+        rc = fw.do_flash("template", False, ports=self._ports(),
                          touch=touched.append,
                          find_volume=lambda: None, timeout_s=0)
         self.assertEqual(rc, 1)
@@ -1053,19 +1052,51 @@ class TestFlashTouches(unittest.TestCase):
     def test_missing_uf2_is_reported_before_touching_anything(self):
         self.uf2.unlink()
         touched = []
-        rc = fw.do_flash("template_main", False, ports=self._ports(),
+        rc = fw.do_flash("template", False, ports=self._ports(),
                          touch=touched.append,
                          find_volume=lambda: self.vol)
         self.assertEqual(rc, 1)
         self.assertEqual(touched, [])
 
-    def test_display_app_touches_the_display(self):
-        touched = []
-        fw.do_flash("lcd_display", False, ports=self._ports(),
-                    touch=touched.append,
-                    find_volume=_volume_after(1, self.vol))
-        self.assertEqual(touched, ["COM60"])
+    def test_missing_uf2_hint_names_the_folder(self):
+        self.uf2.unlink()
+        fw.do_flash("template", False, ports=self._ports(),
+                    touch=lambda p: None, find_volume=lambda: self.vol)
+        self.assertIn("run `fw build template` first", self.err.getvalue())
 
+    def test_display_only_app_is_refused_before_touching_anything(self):
+        touched = []
+        rc = fw.do_flash("lcd", False, ports=self._ports(),
+                         touch=touched.append,
+                         find_volume=lambda: self.vol)
+        self.assertEqual(rc, 1)
+        self.assertEqual(touched, [])
+        self.assertEqual(list(self.vol.iterdir()), [])
+        self.assertIn("only flashes the main CPU", self.err.getvalue())
+
+    def test_uf2_override_skips_the_folder_check_and_still_targets_main(self):
+        # A consumer project's app has no folder in THIS repo's apps/.
+        touched = []
+        rc = fw.do_flash("theirs", False, uf2_override=str(self.uf2),
+                         ports=self._ports(), touch=touched.append,
+                         find_volume=_volume_after(1, self.vol))
+        self.assertEqual(rc, 0)
+        self.assertEqual(touched, ["COM65"])
+
+    def test_cli_flash_with_old_suffix_still_flashes_main(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(fw.main(["flash", "template_display", "--print"]), 0)
+        self.assertIn("<main CPU>", out.getvalue())
+        self.assertIn("deprecated", self.err.getvalue())
+
+    def test_display_image_touches_the_display(self):
+        # The path do_bootloader() takes.
+        touched = []
+        fw._flash_image(self.uf2, "display", False, ports=self._ports(),
+                        touch=touched.append,
+                        find_volume=_volume_after(1, self.vol))
+        self.assertEqual(touched, ["COM60"])
 
 if __name__ == "__main__":
     unittest.main()

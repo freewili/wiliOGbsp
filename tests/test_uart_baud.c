@@ -48,7 +48,7 @@ int main(void) {
     ASSERT_TRUE(fwog_uart_baud_ok(FWOG_SYS_CLK_KHZ * 1000u, FWOG_LINK_BAUD));
 
     /* --- anchored to real measurements, 2026-07-26 (the hardware record) ---
-       These three numbers were read off the hardware by apps/smoke_*, so they
+       These three numbers were read off the hardware by the bring-up smoke apps, so they
        tie this pure model to observed silicon rather than to the datasheet.
        115176 vs 115207 for the same requested 115200 is precisely the
        difference between a 48 MHz and a 200 MHz clk_peri, which is how the

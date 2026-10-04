@@ -20,7 +20,7 @@
  *
  *     cmake --preset target -DFWOG_LVGL_FETCH=ON
  *     cmake --build build --target lvgl_main
- *     python tools/fw.py flash lvgl_main
+ *     python tools/fw.py flash lvgl
  *
  * Without that flag the app is skipped and the rest of the tree builds as
  * usual. See apps/lvgl/CMakeLists.txt.

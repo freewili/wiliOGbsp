@@ -67,26 +67,25 @@ most costly.
 
 | Command                                        | What it does                                                                                            |
 | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| `fw build [app]`                               | configure + build via the `target` preset (Windows) or `target-posix` (macOS/Linux)                     |
-| `fw flash <app>`                               | reboot the app's own CPU into BOOTSEL, then copy its `.uf2`. **Main apps only — see the warning below.** |
+| `fw build [app]`                               | configure + build both halves of `apps/<app>/` via the `target` preset (Windows) or `target-posix` (macOS/Linux) |
+| `fw flash <app>`                               | reboot the **main** CPU into BOOTSEL, then copy `<app>_main.uf2`, which carries the display image. Never flashes the display CPU |
 | `fw test`                                      | build + run the host CTest tree, then the `tools/tests/` Python unit tests for `fw.py` itself            |
-| `fw new-app <name>`                            | copy `apps/template` -- the display+main pair -- to `apps/<name>/` and add it to `CMakeLists.txt`. What a new app almost always wants |
-| `fw new-app <name>_<cpu> --cpu display\|main`  | scaffold one half only, from the matching template; you add it to `CMakeLists.txt` (see below)          |
+| `fw new-app <name>`                            | copy `apps/template` -- the display+main pair -- to `apps/<name>/` and add it to `CMakeLists.txt`        |
 | `fw bootloader`                                | build and flash the display serial bootloader — once per board                                          |
 | `fw bootsel --cpu display\|main` or `--port P` | reboot one CPU into BOOTSEL from the host, no button (`--port` bypasses identification)                 |
 | `fw console [--port P]`                        | attach to a CPU's USB CDC console                                                                       |
 | `fw build [app] --baud N`                      | rebuild both binaries at a different link rate                                                          |
 
-`--print` shows the command instead of running it. `fw new-app <name>` adds
-`add_subdirectory(apps/<name>)` to the top-level `CMakeLists.txt` itself, under
-`apps/template`: a display+main pair carries its own display image, so where
-its line sits does not matter. The single-half `--cpu` form does **not**,
-because a display-only app must be listed before any main app that embeds it
-(the ordering note above `add_subdirectory(apps/lcd)` in that file) -- so a
-human places it. For that form, add `add_subdirectory(apps/<folder>)` yourself
-(it prints the exact line) -- `<folder>` is the app name **without** its
-`_display`/`_main` suffix, because both halves share one folder. See "App
-layout" below.
+`--print` shows the command instead of running it. `<app>` is the app's
+**folder** name -- `fw build ogvegas`, not `ogvegas_main`. The old
+`_display`/`_main` spellings are deprecated: `fw` still accepts them, warns,
+and strips the suffix, so `fw flash ogvegas_display` flashes `ogvegas_main`.
+Bare `fw build` builds `template`.
+
+`fw new-app <name>` always scaffolds the display+main pair -- there is no
+single-CPU form -- and adds `add_subdirectory(apps/<name>)` to the top-level
+`CMakeLists.txt` itself, under `apps/template`: a pair carries its own display
+image, so where its line sits does not matter. See "App layout" below.
 
 ## App layout
 
@@ -105,9 +104,9 @@ apps/ogvegas/
 Two rules follow, and they matter:
 
 - **The folder drops the suffix; the target keeps it.** Targets stay
-  `ogvegas_display` and `ogvegas_main`, because `fw flash` infers the CPU from
-  the target-name suffix and the USB product string is built from it. Only the
-  directory changed.
+  `ogvegas_display` and `ogvegas_main`, because the USB product string and the
+  UF2 record are built from them and `fwog_embed_display_image()` pairs them by
+  name. `fw` commands take the folder and add the suffix themselves.
 - **`fwog_embed_display_image(<name>_main)` defaults to `<name>_display`** —
   the app declared beside it in the same file, so it always exists by then.
   Pass a second argument to embed someone else's
@@ -120,7 +119,7 @@ Two rules follow, and they matter:
 A folder with no `main/` has no companion. `apps/cpuprobe` is flat: it targets
 neither CPU.
 
-> ### Do NOT `fw flash` a display APPLICATION
+> ### Do NOT UF2-flash a display APPLICATION
 >
 > It will not boot, and it takes the display CPU off USB — which is the one
 > CPU with no BOOTSEL button.
@@ -132,27 +131,27 @@ neither CPU.
 > never runs, and the board goes dark and stops enumerating.
 >
 > Display application firmware is meant to arrive **over the link, embedded in
-> the main-CPU binary**. The correct sequence is:
+> the main-CPU binary**, which is why `fw flash` only ever flashes main and
+> refuses a folder with no `main/`. The correct sequence is:
 >
 > ```
-> fw build <your_main_app>      # builds the paired display app too
-> fw flash <your_main_app>      # main pushes the display image, WITH metadata
+> fw build <your_app>      # builds both halves; main embeds the display
+> fw flash <your_app>      # main pushes the display image, WITH metadata
 > ```
 >
-> `<your_main_app>` carries the display app from its own folder, so a pair
-> needs no extra configure step. To push a display app that has no main of its
-> own — `lcd_display`, say — name it globally and use any main app:
+> A pair needs no extra configure step. To push a display app that has no main
+> of its own — `lcd_display`, say — name it globally and use any main app:
 >
 > ```
 > cmake --preset target -DFWOG_DISPLAY_FIRMWARE=lcd_display   # target-posix on macOS/Linux
-> fw build template_main && fw flash template_main
+> fw build template && fw flash template
 > ```
 >
 > That is also the recovery path if you have already UF2-flashed a display
 > app: flashing a main app carrying the display image you want will reset the
 > display, stream the image over the link, write the metadata, and send RUN.
-> `fw flash bl_display` (the bootloader itself) by UF2 remains correct and is
-> the once-per-board step.
+> `fw bootloader` (a UF2 copy of the bootloader itself to the display CPU)
+> remains correct and is the once-per-board step.
 
 ## Invariants
 
@@ -240,9 +239,8 @@ Every display app declares a power policy or **does not link** —
   main-loop iteration, and take your buttons from its return value rather than
   calling `fwog_buttons_poll()` again: that call carries the debounce state
   the hold machine depends on.
-- `FWOG_POWER_CUSTOM()` — this app owns power itself. `bl_display` (through
-  `bl_ship.c`) and `smoke_display` (any button escapes to BOOTSEL) both do,
-  truthfully.
+- `FWOG_POWER_CUSTOM()` — this app owns power itself. `bl_display` does,
+  truthfully, through `bl_ship.c`.
 
 **Read this limit.** The link error proves a policy was *declared*, not that
 `fwog_power_poll()` is *called*. No linker can see that, and the runtime
@@ -314,7 +312,7 @@ trade the display CPU's only remote recovery for a version field it already
 carries in its product string and its UF2 record.
 
 **When changing USB IDs, flash an application first.** The display CPU has no
-BOOTSEL button, and `fw flash bl_display` needs a working 1200-baud open
+BOOTSEL button, and `fw bootloader` needs a working 1200-baud open
 against the *running* image.
 
 **6. Every image carries a `fwog_uf2_info_t` record.**

@@ -2,10 +2,11 @@
 """fw — FreeWili OG BSP task runner (cross-platform).
 
 Commands:
-  fw build [app] [--baud N]  configure+build an app for the RP2040 target
-  fw flash <app> [--uf2 P]   reboot the app's own CPU into BOOTSEL, then copy
-                              its .uf2 (--uf2 for a UF2 built outside this
-                              repo, e.g. a project consuming the BSP)
+  fw build [app] [--baud N]  configure+build an app (both halves of a pair)
+  fw flash <app> [--uf2 P]   reboot the MAIN CPU into BOOTSEL, then copy the
+                              app's main .uf2, which carries its display image
+                              (--uf2 for a UF2 built outside this repo, e.g. a
+                              project consuming the BSP)
   fw bootloader              build and flash the display serial bootloader
   fw bootsel --cpu C|--port P  reboot one CPU into BOOTSEL, no button
   fw console [--port P]      attach to a CPU's USB CDC console
@@ -14,10 +15,12 @@ Commands:
                               for this task runner
   fw new-app <name>          copy apps/template (the display+main pair) to
                               apps/<name>/ and add it to CMakeLists.txt
-  fw new-app <name>_display|<name>_main --cpu display|main
-                              scaffold one half only (add it to
-                              CMakeLists.txt yourself)
 Add --print to print the command(s) instead of running them.
+
+<app> is the app's FOLDER name under apps/ -- `ogvegas`, not `ogvegas_main`.
+The old _display/_main target suffixes are deprecated: they are still
+accepted, with a warning, and stripped. `fw flash` only ever flashes the main
+CPU; the display half arrives over the link inside main's UF2.
 
 `fw console` supersedes the `fw mon` that earlier versions of this file
 promised: both are "read a CPU's USB CDC output", and one command with a
@@ -50,9 +53,9 @@ import sys
 import time
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
-# Must name an app that actually exists in apps/, or a bare `fw build`
-# always fails. Only template_display and template_main exist so far.
-DEFAULT_APP = "template_main"
+# Must name an app folder that actually exists in apps/, or a bare `fw build`
+# always fails.
+DEFAULT_APP = "template"
 
 # The display serial bootloader. Flashed once per board by UF2; after that
 # the display's application firmware arrives over the link, embedded in
@@ -192,8 +195,8 @@ def uf2_path(app, override=None):
     mounted) is exactly what a consumer wants, and none of it depends on
     where the file came from.
 
-    The CPU is still inferred from `app`, so a consumer passing --uf2 must
-    still name its app with the _display/_main suffix -- see app_cpu().
+    `app` is a CMake TARGET name here (template_main, bl_display), not the
+    folder name the CLI takes -- see main_target().
 
     In-tree, the image is under the app's FOLDER, not its target name: both
     halves of a pair share apps/<folder>/ (see AGENTS.md, "App layout"), and
@@ -214,18 +217,59 @@ def app_folder(app):
     return app
 
 
-def app_cpu(app):
-    """Which CPU an app targets, from its name suffix. The suffix is a
-    convention the templates enforce; it keeps `fw flash` from telling you to
-    BOOTSEL the wrong processor."""
-    if app.endswith("_display"):
-        return "display"
-    if app.endswith("_main"):
-        return "main"
+def resolve_app(cmd, app):
+    """The app folder name for `fw <cmd> <app>`.
+
+    The CLI takes the folder name. Naming a target with its _display/_main
+    suffix is the old single-CPU spelling: still accepted, so scripts and
+    muscle memory keep working, but it is stripped and says so on stderr."""
+    name = app_folder(app)
+    if name != app:
+        print(f"fw {cmd}: the {app[len(name):]} suffix is deprecated and "
+              f"ignored; use `fw {cmd} {name}`", file=sys.stderr)
+    return name
+
+
+def build_target(name, repo_root=REPO_ROOT):
+    """The CMake target `fw build <name>` builds.
+
+    A pair builds its main half, which depends on the display half it embeds,
+    so one target builds both. A display-only folder (lcd, bl) builds its
+    display target, and a folder that is neither (cpuprobe) is its own
+    target. A name with no folder here is passed through for CMake to judge."""
+    d = pathlib.Path(repo_root) / "apps" / name
+    if (d / "main").is_dir():
+        return f"{name}_main"
+    if (d / "display").is_dir():
+        return f"{name}_display"
+    return name
+
+
+def main_target(name, repo_root=REPO_ROOT):
+    """The main-CPU target `fw flash <name>` copies, or raise ValueError.
+
+    Only main ever gets flashed. A UF2 copy of a display APPLICATION skips the
+    metadata sector, so it never boots and takes the display CPU -- the one
+    with no BOOTSEL button -- off USB. Display images reach the board inside
+    a main UF2, which is why a folder with no main/ is refused here rather
+    than flashed onto the wrong CPU."""
+    d = pathlib.Path(repo_root) / "apps" / name
+    if not d.is_dir():
+        raise ValueError(f"no app named {name!r} (no apps/{name}/)")
+    if (d / "main").is_dir():
+        return f"{name}_main"
+    if name == app_folder(BOOTLOADER_APP):
+        raise ValueError(
+            f"{name!r} is the display bootloader; use `fw bootloader`")
+    if (d / "display").is_dir():
+        raise ValueError(
+            f"apps/{name} has no main/ half, and fw flash only flashes the "
+            "main CPU. A display-only app reaches the board inside a main "
+            f"app: configure with -DFWOG_DISPLAY_FIRMWARE={name}_display, "
+            "then `fw build template` and `fw flash template`.")
     raise ValueError(
-        f"cannot tell which CPU '{app}' targets: "
-        "app names must end in _display or _main"
-    )
+        f"apps/{name} is neither a display+main pair nor a display app, so "
+        "fw flash cannot place it; copy its .uf2 by hand")
 
 
 def _removable_drives_win():
@@ -360,79 +404,21 @@ def test_command():
 APP_NAME_RE = re.compile(r"[a-z][a-z0-9_]*")
 
 
-def new_app(name, cpu=None, repo_root=REPO_ROOT):
+def new_app(name, repo_root=REPO_ROOT):
     """Scaffold a new app from apps/template.
 
-    With no `cpu`, copy the whole template -- the display+main pair -- to
-    apps/<name>/, with targets <name>_display and <name>_main. That is what a
-    new app almost always wants: the display half is where the LCD, buttons
-    and LEDs live, and it can only reach the board embedded in a main half.
-    With `cpu`, scaffold just that half (see below)."""
-    if cpu is None:
-        return _new_app_pair(name, repo_root)
-    if cpu not in ("display", "main"):
-        raise ValueError(f"cpu must be 'display' or 'main', got {cpu!r}")
-    # `fw flash` derives the CPU from the app-name suffix alone -- it never
-    # inspects which BSP library the app linked. So an app named foo_main but
-    # built from the display template would tell the operator to BOOTSEL the
-    # main CPU and flash a display binary onto it. Refuse the contradiction
-    # here, where it is still cheap.
-    if app_cpu(name) != cpu:
-        raise ValueError(
-            f"app name {name!r} implies the {app_cpu(name)} CPU but --cpu is "
-            f"{cpu!r}; `fw flash` trusts the name suffix, so these must agree")
-    # apps/<folder>/{display,main}/main.c with ONE CMakeLists.txt at the
-    # folder root: a display app and its main companion are one deliverable
-    # (the main UF2 carries the display image inside it), so they are scaffolded
-    # together and declared together. `name` is the TARGET name and keeps its
-    # _display/_main suffix -- fw flash and the USB product string both read
-    # it -- while the folder is that name without the suffix.
-    folder = name.rsplit("_", 1)[0]
-    src = pathlib.Path(repo_root) / "apps" / "template"
-    dest = pathlib.Path(repo_root) / "apps" / folder
-    if dest.exists():
-        raise FileExistsError(dest)
-    shutil.copytree(src, dest)
-
-    # The template is a pair. Keep only the half that was asked for, and drop
-    # the other half's declaration from the merged CMakeLists.
-    cml = dest / "CMakeLists.txt"
-    text = cml.read_text().replace("template_", f"{folder}_")
-    other = "main" if cpu == "display" else "display"
-    if (dest / other).exists():
-        shutil.rmtree(dest / other)
-        # Each target's block runs from its add_executable() to the blank line
-        # before the next one; drop the unwanted target's block wholesale.
-        blocks = [b for b in text.split("\n\n")
-                  if f"add_executable({folder}_{other}" not in b]
-        text = "\n\n".join(blocks)
-        if cpu == "main":
-            # There is no <folder>_display to carry, so the default pair
-            # lookup in fwog_embed_display_image() would fail at configure
-            # time. Leave the call in, commented, with what to do about it --
-            # a main app that never embeds one cannot update the display CPU.
-            text = text.replace(
-                f"fwog_embed_display_image({name})",
-                "# No display app in this folder to carry. Either scaffold one\n"
-                "#   fw new-app " + f"{folder}_display --cpu display\n"
-                "# and drop the comment below, or name another app's display\n"
-                "# explicitly, e.g. fwog_embed_display_image("
-                f"{name} template_display).\n"
-                "# Without it this app cannot update the display CPU at all.\n"
-                f"# fwog_embed_display_image({name})")
-    cml.write_text(text)
-    return dest
-
-
-def _new_app_pair(name, repo_root):
+    Always the whole template -- the display+main pair -- copied to
+    apps/<name>/, with targets <name>_display and <name>_main. The display
+    half is where the LCD, buttons and LEDs live, and it can only reach the
+    board embedded in a main half, so the two are one deliverable."""
     if not APP_NAME_RE.fullmatch(name):
         raise ValueError(
             f"{name!r} is not a usable app name: use lowercase letters, digits "
             "and underscores, starting with a letter (e.g. button_lights)")
     if name.endswith(("_display", "_main")):
         raise ValueError(
-            f"give the bare name for a display+main pair (fw new-app "
-            f"{app_folder(name)}); for one half only, add --cpu")
+            f"give the bare name (fw new-app {app_folder(name)}); every app is "
+            "a display+main pair and the _display/_main targets are made for you")
     src = pathlib.Path(repo_root) / "apps" / "template"
     dest = pathlib.Path(repo_root) / "apps" / name
     if dest.exists():
@@ -448,12 +434,10 @@ def _new_app_pair(name, repo_root):
 def register_app(folder, repo_root=REPO_ROOT):
     """Add `add_subdirectory(apps/<folder>)` to the top-level CMakeLists.txt.
 
-    For a display+main PAIR only. A pair carries its own display image, so
-    where its line sits does not matter (see the ordering note above
-    add_subdirectory(apps/lcd) in that file); it goes straight under
-    apps/template, or at the end if that line is gone. A display-only app is
-    different -- it must be listed before any main app that embeds it -- so
-    the single-half --cpu form leaves placement to a human.
+    A display+main pair carries its own display image, so where its line sits
+    does not matter (see the ordering note above add_subdirectory(apps/lcd)
+    in that file); it goes straight under apps/template, or at the end if
+    that line is gone.
 
     Returns True when the line was added, False when it was already there."""
     top = pathlib.Path(repo_root) / "CMakeLists.txt"
@@ -466,7 +450,6 @@ def register_app(folder, repo_root=REPO_ROOT):
     lines.insert(at, line)
     top.write_text("\n".join(lines) + "\n")
     return True
-
 
 
 def _run(cmds, do_print):
@@ -715,13 +698,32 @@ def _pick_console_port(ports, product_substr=FWOG_BL_USB_PRODUCT):
               "RP2040 present.")
     return matches[0].device
 
-def do_flash(app, do_print, timeout_s=120, touch=None, find_volume=None,
-             ports=None, pause=None, uf2_override=None):
-    """Copy an app's UF2 to a BOOTSEL volume, putting the right CPU there first.
+def do_flash(app, do_print, uf2_override=None, repo_root=REPO_ROOT, **kw):
+    """Flash app folder `app` -- always its MAIN half, see main_target().
 
-    The CPU comes from app_cpu(), i.e. the app-name suffix, which this command
-    has always trusted -- new_app() refuses a name that contradicts its
-    template precisely to protect that inference.
+    With --uf2 the image came from another project's build tree, so there is
+    no folder here to check; it is still copied to the main CPU, which is the
+    only CPU this command flashes. `kw` passes through to _flash_image()."""
+    if uf2_override is None:
+        try:
+            target = main_target(app, repo_root)
+        except ValueError as e:
+            print(f"fw flash: {e}", file=sys.stderr)
+            return 1
+    else:
+        target = f"{app}_main"
+    return _flash_image(uf2_path(target, uf2_override), "main", do_print,
+                        build_hint=None if uf2_override else f"fw build {app}",
+                        **kw)
+
+
+def _flash_image(uf2, cpu, do_print, build_hint=None, timeout_s=120,
+                 touch=None, find_volume=None, ports=None, pause=None):
+    """Copy `uf2` to a BOOTSEL volume, putting `cpu` there first.
+
+    `cpu` is decided by the caller, never inferred from a name: do_flash()
+    always says main, and do_bootloader() -- the one sanctioned UF2 copy to
+    the display CPU -- says display.
 
     Three paths, and the last two are what this command did before the touch
     existed, unchanged:
@@ -748,15 +750,12 @@ def do_flash(app, do_print, timeout_s=120, touch=None, find_volume=None,
     touch = touch or _touch_port
     find_volume = find_volume or find_rpi_rp2
     pause = pause or _pause_before_flash
-    uf2 = uf2_path(app, uf2_override)
-    cpu = app_cpu(app)
     if do_print:
         print(f"touch <{cpu} CPU> at 1200 baud to reboot it into BOOTSEL, "
               f"then copy {uf2} -> <RPI-RP2 volume>   # {cpu} CPU")
         return 0
     if not uf2.exists():
-        hint = ("check the path" if uf2_override
-                else f"run `fw build {app}` first")
+        hint = f"run `{build_hint}` first" if build_hint else "check the path"
         print(f"{uf2} not found — {hint}", file=sys.stderr)
         return 1
 
@@ -919,7 +918,8 @@ def do_bootsel(cpu=None, port=None, do_print=False, timeout_s=30,
 def do_bootloader(do_print, timeout_s=120):
     """Build and flash the display serial bootloader. Once per board."""
     _run([configure_command(), build_command(BOOTLOADER_APP)], do_print)
-    return do_flash(BOOTLOADER_APP, do_print, timeout_s=timeout_s)
+    return _flash_image(uf2_path(BOOTLOADER_APP), "display", do_print,
+                        build_hint="fw bootloader", timeout_s=timeout_s)
 
 
 def do_console(port=None, product=FWOG_BL_USB_PRODUCT, do_print=False):
@@ -970,17 +970,21 @@ def main(argv=None):
     p = argparse.ArgumentParser(prog="fw")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    b = sub.add_parser("build"); b.add_argument("app", nargs="?", default=DEFAULT_APP)
+    b = sub.add_parser("build")
+    b.add_argument("app", nargs="?", default=DEFAULT_APP,
+                   help="app folder under apps/, e.g. ogvegas")
     b.add_argument("--print", action="store_true", dest="do_print")
     b.add_argument("--baud", type=int, default=None,
                    help="inter-CPU link rate; rebuilds both binaries")
 
-    f = sub.add_parser("flash"); f.add_argument("app")
+    f = sub.add_parser("flash")
+    f.add_argument("app", help="app folder under apps/, e.g. ogvegas; its "
+                               "main half is flashed")
     # For projects that consume this BSP as a submodule: their UF2 is in their
     # build tree, not this one. See uf2_path().
     f.add_argument("--uf2", default=None,
                    help="path to the .uf2 to copy (default: this repo's "
-                        "build/apps/<folder>/<app>.uf2)")
+                        "build/apps/<app>/<app>_main.uf2)")
     f.add_argument("--print", action="store_true", dest="do_print")
 
     bl = sub.add_parser("bootloader")
@@ -1003,18 +1007,16 @@ def main(argv=None):
     t.add_argument("--print", action="store_true", dest="do_print")
 
     n = sub.add_parser("new-app"); n.add_argument("name")
-    n.add_argument("--cpu", default=None, choices=["display", "main"],
-                   help="scaffold only one half, and add it to CMakeLists.txt "
-                        "yourself; omit for a display+main pair")
 
     a = p.parse_args(argv)
     if a.cmd == "build":
         # Configure first: on a fresh checkout there is no build/ tree, and
         # `cmake --build --preset` fails with an unhelpful "not a directory".
         # Re-configuring an already-configured tree is cheap and idempotent.
-        _run([configure_command(a.baud), build_command(a.app)], a.do_print); return 0
+        target = build_target(resolve_app("build", a.app))
+        _run([configure_command(a.baud), build_command(target)], a.do_print); return 0
     if a.cmd == "flash":
-        return do_flash(a.app, a.do_print, uf2_override=a.uf2)
+        return do_flash(resolve_app("flash", a.app), a.do_print, uf2_override=a.uf2)
     if a.cmd == "bootloader":
         return do_bootloader(a.do_print)
     if a.cmd == "bootsel":
@@ -1025,24 +1027,19 @@ def main(argv=None):
         _run(test_command(), a.do_print); return 0
     if a.cmd == "new-app":
         try:
-            d = new_app(a.name, a.cpu, repo_root=REPO_ROOT)
+            d = new_app(a.name, repo_root=REPO_ROOT)
         except (ValueError, FileExistsError) as e:
             print(f"fw new-app: {e}", file=sys.stderr)
             return 2
         print(f"created {d}")
         line = f"add_subdirectory(apps/{d.name})"
-        if a.cpu is not None:
-            # One half: placement matters for a display-only app, so a human
-            # decides -- see register_app().
-            print(f"Add `{line}` to CMakeLists.txt")
-            return 0
         try:
             added = register_app(d.name, repo_root=REPO_ROOT)
             print(("added to" if added else "already in") + f" CMakeLists.txt: {line}")
         except OSError as e:
             print(f"could not update CMakeLists.txt ({e}); add `{line}` yourself")
-        print(f"next:  python tools/fw.py build {d.name}_main\n"
-              f"       python tools/fw.py flash {d.name}_main")
+        print(f"next:  python tools/fw.py build {d.name}\n"
+              f"       python tools/fw.py flash {d.name}")
         return 0
     return 1
 

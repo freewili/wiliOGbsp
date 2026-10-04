@@ -40,8 +40,8 @@ extension's layout (`toolchain/15_2_Rel1`, `ninja/v1.13.2`).
 
 ```bash
 fw bootloader              # once per board: serial bootloader -> display CPU
-fw build template_main     # build a main-CPU app (carries the display image)
-fw flash template_main     # BOOTSEL that CPU, then it copies the .uf2
+fw build template          # build an app: both halves, display image inside main
+fw flash template          # BOOTSEL the main CPU, then copy its .uf2
 fw console                 # attach to the display bootloader's USB console
 fw test                    # host unit tests, no hardware
 ```
@@ -54,10 +54,11 @@ Two rules worth knowing before you plug anything in:
 
 - Put only **one** CPU in BOOTSEL at a time. Both present the same USB serial,
   so with two mounted neither the tools nor you can tell which is which.
-- Never `fw flash` a display *application*. It will not boot and it takes the
-  display CPU off USB — the one CPU with no BOOTSEL button. Display apps ride
-  along inside the main CPU's UF2. See [AGENTS.md](./AGENTS.md) for the full
-  reason and the recovery path.
+- Never UF2-copy a display *application* to the display CPU. It will not boot
+  and it takes the display CPU off USB — the one CPU with no BOOTSEL button.
+  Display apps ride along inside the main CPU's UF2, which is why `fw flash`
+  only ever flashes main. See [AGENTS.md](./AGENTS.md) for the full reason and
+  the recovery path.
 
 ## What's in `apps/`
 
@@ -72,8 +73,9 @@ apps/ogvegas/
     main/main.c
 ```
 
-Targets keep their `_display`/`_main` suffix; only the folder drops it. A
-folder with no `main/` has no companion.
+Targets keep their `_display`/`_main` suffix; only the folder drops it. `fw`
+commands take the folder name (`fw build ogvegas`); the suffixed spellings
+still work but are deprecated. A folder with no `main/` has no companion.
 
 | App         | What it is                                                                       |
 | ----------- | -------------------------------------------------------------------------------- |
@@ -81,7 +83,7 @@ folder with no `main/` has no companion.
 | `ogvegas`   | Showcase: LCD image, audio replay and an animated LED comet, all at once.        |
 | `lvgl`      | LVGL example — a list you drive with the front-panel buttons. Opt-in, see below. |
 | `bench`     | Console for poking every driver from the host, via `tools/bench.py`.             |
-| `smoke`     | Bare-board bring-up: clocks, USB, the inter-CPU link.                            |
+| `smoketest` | Link soak at the production baud: counts errors, reports both CPUs' clocks.      |
 | `lcd`       | ST7789 panel bring-up on its own.                                                |
 | `bl`        | The display serial bootloader. Flashed once per board.                           |
 | `cpuprobe`  | Answers "which CPU is this?" on a board where you cannot tell.                   |
@@ -99,7 +101,7 @@ fetch LVGL for you:
 ```bash
 cmake --preset target -DFWOG_LVGL_FETCH=ON   # target-posix on macOS/Linux
 cmake --build build --target lvgl_main
-fw flash lvgl_main
+fw flash lvgl
 ```
 
 Budget for it: roughly **390 KB of flash and 143 KB of RAM** of the RP2040's
